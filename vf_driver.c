@@ -25,7 +25,7 @@
 #define BRAM1_START 0x80410000
 #define BRAM1_END   0x8041FFFF
 
-static int *vf_buf;
+static int *vf_buf, *buf_pos;
 static int *bram0_base, *bram1_base, *ctrl, *cnt, *addr, *conf, *src, *stat, *dst;
 static int vf_bufsize = 8192;
 
@@ -41,9 +41,11 @@ static ssize_t vf_write(struct file *file, const char __user *buf, size_t count,
 static int vf_mmap(struct file *file, struct vm_area_struct *vma);
 static long vf_ioctl(struct file *file, unsigned int ioctl_cmd, unsigned long ioctl_param);
 
-void vf_conf_fir(void);
+void vf_initialize(void);
+void vf_conf_fir(unsigned long config_bytes);
+void vf_data_input(unsigned long data_bytes);
 void vf_start(void);
-void vf_get_result(void);
+void vf_get_result(unsigned long data_bytes);
 
 static struct file_operations vf_fops = {
 	.open	= vf_open,
@@ -71,6 +73,8 @@ static ssize_t vf_read(struct file *file, char __user *buf, size_t count, loff_t
 		return -EFAULT;
 	} else { //increase the position in the open file
 		*ppos += transfer_size;
+		*buf_pos = *ppos;
+//		printk("buffer last postion %x\n\r", *buf_pos);
 		return transfer_size;
 	}
 }
@@ -88,12 +92,15 @@ static ssize_t vf_write(struct file *file, const char __user *buf, size_t count,
 		return -EFAULT;
 	} else { //increase the position in the open file
 		*ppos += count;
+		*buf_pos = *ppos;
+//		printk("buffer last postion %x\n\r", *buf_pos);
 		return count;
 	}
 }
 
 static int vf_open(struct inode *inode, struct file *file) {
 	printk(KERN_INFO "vf opened\n\r");
+	vf_initialize();
 	return 0;
 }
 
@@ -114,14 +121,17 @@ static int vf_mmap(struct file *file, struct vm_area_struct *vma) {
 static long vf_ioctl(struct file *file, unsigned int ioctl_cmd, unsigned long ioctl_param) {
 
 	switch (ioctl_cmd) {
+	case VF_DATA_INPUT:  // call for the data input
+		vf_data_input(ioctl_param);
+		break;
 	case VF_CONF_FIR:  // call for the configuration function
-		vf_conf_fir();
+		vf_conf_fir(ioctl_param);
 		break;
 	case VF_START:     // call for start VF processing
 		vf_start();
 		break;
 	case VF_GET_RESULT:// read result from VF
-		vf_get_result();
+		vf_get_result(ioctl_param);
 		break;
 	default: 
 		return -ENOTTY;
@@ -130,57 +140,38 @@ static long vf_ioctl(struct file *file, unsigned int ioctl_cmd, unsigned long io
 	return 0;
 }
 
-void vf_conf_fir(void) {
-	int i;
-//	int bram0_base, bram1_base, ctrl, cnt, addr, conf, src, stat, dst;
-	bram0_base = ioremap(BRAM0_START, BRAM0_END - BRAM0_START);  //map the bram0 base
-	bram1_base = ioremap(BRAM1_START, BRAM1_END - BRAM1_START);  //map the bram1 base
+void vf_initialize(void) {
+        bram0_base = ioremap(BRAM0_START, BRAM0_END - BRAM0_START);  //map the bram0 base
+        bram1_base = ioremap(BRAM1_START, BRAM1_END - BRAM1_START);  //map the bram1 base
 
-//	printk("bram0: %x\n\r", (unsigned int)bram0_base);
-//	printk("bram1: %x\n\r", (unsigned int)bram1_base);
+//      printk("bram0: %x\n\r", (unsigned int)bram0_base);
+//      printk("bram1: %x\n\r", (unsigned int)bram1_base);
 
-	ctrl = bram0_base;
-	cnt  = bram0_base + 0x1;
-	addr = bram0_base + 0x2;
-	conf = bram0_base + 0x3;
-	src  = bram0_base + 0x40;
+        ctrl = bram0_base;
+        cnt  = bram0_base + 0x1;
+        addr = bram0_base + 0x2;
+        conf = bram0_base + 0x3;
+        src  = bram0_base + 0x40;
 
-	stat = bram1_base;
-	dst  = bram1_base + 0x40;
+        stat = bram1_base;
+        dst  = bram1_base + 0x40;
 
-//	printk("control: %x\n\r", (unsigned int)ctrl);
-//	printk("address: %x\n\r", (unsigned int)addr);
-//	printk("conf: %x\n\r", (unsigned int)conf);
-//	printk("source: %x\n\r", (unsigned int)src);
-//	printk("status: %x\n\r", (unsigned int)stat);
-//	printk("destination: %x\n\r", (unsigned int)dst);
-	for(i=0;i<40;i++) src[i]=i+0x01;   //*(src+i)=i+1;
-//	for(i=0;i<40;i++) printk(KERN_INFO "data in[%d]: %x\n\r", i, (unsigned int)src[i]);
-	
-	iowrite32(0x07b5a000, &(conf[0])); //(void *)(conf+0)
-	iowrite32(0x00000005, &(conf[1]));    //(void *)((unsinged int)conf+4)
-	iowrite32(0x00000000, &(conf[2]));  //conf conf+0  *(conf+1)=conf[1]=*((unsigned int)conf+4) &conf=conf conf+1=&(conf[1])=(unsigned int)conf+4  vf_conf_fir=&vf_conf_fir
-	iowrite32(0x07b5a000, &(conf[3]));  //void **conf *(*(conf+1)+3)=conf[1][3]
-	iowrite32(0x00000007, &(conf[4]));
-	iowrite32(0x00000000, &(conf[5]));
-	iowrite32(0x07b5e000, &(conf[6]));
-	iowrite32(0x00000005, &(conf[7]));
-	iowrite32(0x00000000, &(conf[8]));
-	iowrite32(0x07b52000, &(conf[9]));
-	iowrite32(0x00000007, &(conf[10]));
-	iowrite32(0x00000000, &(conf[11]));
+//      printk("control: %x\n\r", (unsigned int)ctrl);
+//      printk("address: %x\n\r", (unsigned int)addr);
+}
 
-	iowrite32(0xffffffff, &(conf[12]));
-	iowrite32(0x00678000, &(conf[13]));
-	iowrite32(0xffffffff, &(conf[14]));
-	iowrite32(0x00678000, &(conf[15]));
-	iowrite32(0x00000345, &(conf[16]));
-	iowrite32(0xffffffff, &(conf[17]));
-	iowrite32(0x00678000, &(conf[18]));
-	iowrite32(0xffffffff, &(conf[19]));
-	iowrite32(0x00678000, &(conf[20]));
-	iowrite32(0xffffffff, &(conf[21]));
-//	wmb();
+void vf_conf_fir(unsigned long config_bytes) {
+//	int i;
+	memcpy_toio(conf, (void *)(vf_buf + *buf_pos - config_bytes*4), config_bytes*4);
+//	for(i=0;i<22;i++) printk("vf buf[%d]: %x\n\r", i, (unsigned int)(vf_buf[i]));
+//	for(i=0;i<22;i++) printk("conf[%d]: %x\n\r", i, (unsigned int)(conf[i]));
+}
+
+void vf_data_input(unsigned long data_bytes) {
+//	int i;
+	memcpy_toio(src, (void *)(vf_buf + *buf_pos - data_bytes*4), data_bytes*4);
+//	for(i=22;i<40;i++) printk("vf buf[%d]: %x\n\r", i, (unsigned int)(vf_buf[i]));
+//	for(i=0;i<40;i++) printk("src[%d]: %x\n\r", i, (unsigned int)(src[i]));
 }
 
 void vf_start(void) {
@@ -189,9 +180,9 @@ void vf_start(void) {
 //	wmb();
 }
 
-void vf_get_result(void) {
-	int status, i;
-//	char __user *buf;
+void vf_get_result(unsigned long data_bytes) {
+	int status;
+//	int i;
 
 	status = ioread32((void *)stat);
 //	printk("status: %x\n\r", status);
@@ -200,18 +191,16 @@ void vf_get_result(void) {
 
 	printk(KERN_INFO"vf finished, ready to read the result\n\r");
 //	for(i=0;i<40;i++) printk("data out[%d]: %x\n\r", i, (unsigned int)dst[i]);
-//	ioread32_rep(dst, vf_buf, 40);
-	memcpy_fromio(vf_buf, dst, 40*4);
-//	for(i=0;i<40;i++) printk("vf buf[%d]: %x\n\r", i, (unsigned int)(vf_buf[i]));
-//	copy_to_user(buf /*to*/, dst /*from*/, 40);
+	memcpy_fromio((void *)(vf_buf + *buf_pos), dst, data_bytes*4);
+//	for(i=40;i<40;i++) printk("vf buf[%d]: %x\n\r", i, (unsigned int)(vf_buf[i]));
 	iowrite32(0x00000000, stat);	
 }
 
 static int __init vf_init (void) {
 	int err;
 
-//	vf_buf = ioremap(VF_PHYS, vf_bufsize);
 	vf_buf = kmalloc(vf_bufsize, GFP_KERNEL);
+	buf_pos= kmalloc(1, GFP_KERNEL);
 	if (!vf_buf) {
 		err = -ENOMEM;
 		goto err_exit;
